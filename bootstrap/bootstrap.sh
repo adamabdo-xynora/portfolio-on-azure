@@ -60,6 +60,10 @@ readonly STATE_ACCOUNT="stportfolioazuretf"
 readonly STATE_CONTAINER="tfstate"
 readonly STATE_LOCK_NAME="do-not-delete-terraform-state"
 
+# Microsoft.Storage REST API version for the one property the CLI cannot set
+# (see ensure_state_storage). Registered for this subscription as of 2026-10-04.
+readonly STORAGE_API_VERSION="2026-09-01"
+
 # The ceiling for every role assignment this script makes (see ensure_role).
 readonly RG_SCOPE="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}"
 
@@ -133,6 +137,11 @@ retry() {
   done
   return 1
 }
+
+# True if az printed a boolean true. `-o tsv` prints a scalar query result as
+# `true` but a boolean inside an object projection as `True`, so compare
+# without case rather than depend on the query's shape.
+is_true() { [[ "$(tr '[:upper:]' '[:lower:]' <<<"$1")" == "true" ]]; }
 
 # Strip whitespace so a condition string compares equal after Azure stores it.
 squash() { tr -d '[:space:]' <<<"$1"; }
@@ -216,7 +225,7 @@ ensure_state_storage() {
   if ! az storage account show --resource-group "$RESOURCE_GROUP" --name "$STATE_ACCOUNT" --output none 2>/dev/null; then
     local available
     available="$(az storage account check-name --name "$STATE_ACCOUNT" --query nameAvailable -o tsv)"
-    [[ "$available" == "true" ]] || die "storage account name $STATE_ACCOUNT is not available"
+    is_true "$available" || die "storage account name $STATE_ACCOUNT is not available"
     az storage account create \
       --resource-group "$RESOURCE_GROUP" \
       --name "$STATE_ACCOUNT" \
@@ -228,7 +237,6 @@ ensure_state_storage() {
       --https-only true \
       --allow-blob-public-access false \
       --allow-shared-key-access false \
-      --default-to-oauth-authentication true \
       --allow-cross-tenant-replication false \
       --public-network-access Enabled \
       --tags "${TAGS[@]}" \
@@ -247,11 +255,25 @@ ensure_state_storage() {
     --https-only true \
     --allow-blob-public-access false \
     --allow-shared-key-access false \
-    --default-to-oauth-authentication true \
     --allow-cross-tenant-replication false \
     --tags "${TAGS[@]}" \
     --output none
   ok "TLS 1.2 minimum, HTTPS only, no public blob access, no shared keys"
+
+  # Default the portal and tools to Entra ID (OAuth) for data access. Azure
+  # CLI 2.90.0 has no flag for this on `storage account create` or `update`
+  # (checked against --help), so the property is set with the REST
+  # operation that defines it: PATCH storageAccounts with
+  # properties.defaultToOAuthAuthentication, from the Microsoft.Storage
+  # 2026-09-01 spec. It is then read back from ARM, and the run aborts unless
+  # it is true.
+  local account_url="https://management.azure.com${RG_SCOPE}/providers/Microsoft.Storage/storageAccounts/${STATE_ACCOUNT}?api-version=${STORAGE_API_VERSION}"
+  az rest --method patch --url "$account_url" \
+    --body '{"properties":{"defaultToOAuthAuthentication":true}}' --output none
+  local oauth_default
+  oauth_default="$(az rest --method get --url "$account_url" --query properties.defaultToOAuthAuthentication -o tsv)"
+  is_true "$oauth_default" || die "defaultToOAuthAuthentication reads back as '$oauth_default', expected true"
+  ok "Entra ID (OAuth) is the default data-plane authentication"
 
   # Versioning keeps every prior state file. Blob and container soft delete
   # are a second net: a deleted state blob or container is recoverable for
@@ -272,7 +294,7 @@ ensure_state_storage() {
   local exists
   exists="$(az storage container-rm exists --resource-group "$RESOURCE_GROUP" \
     --storage-account "$STATE_ACCOUNT" --name "$STATE_CONTAINER" --query exists -o tsv)"
-  if [[ "$exists" != "true" ]]; then
+  if ! is_true "$exists"; then
     az storage container-rm create --resource-group "$RESOURCE_GROUP" \
       --storage-account "$STATE_ACCOUNT" --name "$STATE_CONTAINER" \
       --public-access off --output none
