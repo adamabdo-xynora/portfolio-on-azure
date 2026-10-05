@@ -1,0 +1,329 @@
+# Terraform plan on pull requests; plan, approve, and apply exactly that plan
+# on main.
+#
+# Two Azure identities, both keyless (OIDC federated credentials, no secrets;
+# see docs/identities.md):
+#   PLAN   (vars.AZURE_PLAN_CLIENT_ID)   Reader + state lease. Used by plan-pr
+#                                        and plan-main.
+#   APPLY  (vars.AZURE_APPLY_CLIENT_ID)  Contributor + constrained RBAC admin.
+#                                        Used only by apply, which runs in the
+#                                        azure-demo environment (required
+#                                        reviewer, main only). Its federated
+#                                        credential trusts only that
+#                                        environment.
+#
+# The reviewer approves a specific plan: plan-main saves the binary plan and
+# its SHA-256; apply downloads that file, refuses it if the hash differs, and
+# applies it. Never a fresh plan. Terraform also refuses a saved plan whose
+# state has moved on ("stale plan").
+#
+# This repository is public, so artifacts and logs are public. Before any plan
+# is uploaded, scripts/plan_secrets_guard.py fails the job if the plan holds
+# any sensitive value. Artifacts are kept for one day.
+#
+# Least privilege for the GITHUB_TOKEN: nothing at workflow level; each job
+# asks for what it uses. id-token: write only where a job logs in to Azure;
+# pull-requests: write only on the job that comments, which has no Azure
+# token.
+
+name: terraform
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions: {}
+
+defaults:
+  run:
+    # An explicit `shell: bash` runs as `bash --noprofile --norc -eo pipefail`;
+    # the implicit default does not set pipefail. Steps below also avoid pipes
+    # where an exit code matters.
+    shell: bash
+
+concurrency:
+  # One run per PR at a time (a newer push supersedes an older plan); runs on
+  # main queue behind each other and are never cancelled mid-apply.
+  group: terraform-${{ github.event_name == 'push' && 'main' || github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TF_VERSION: "1.16.4"
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_DIR: terraform
+  # Terraform authenticates with the job's GitHub OIDC token. Client, tenant
+  # and subscription IDs are identifiers, not secrets, and live in
+  # repository variables. ARM_CLIENT_ID is set per job.
+  ARM_USE_OIDC: "true"
+  ARM_USE_CLI: "false"
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  checks:
+    name: checks (no Azure)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: shellcheck bootstrap scripts
+        run: shellcheck --shell=bash bootstrap/*.sh
+
+      - name: plan-secrets guard tests (unit and end-to-end with real Terraform)
+        run: python3 -m unittest discover -s scripts -v
+
+      - name: terraform fmt -check
+        run: terraform -chdir="$TF_DIR" fmt -check -recursive -diff
+
+      - name: terraform init (no backend) and validate
+        run: |
+          terraform -chdir="$TF_DIR" init -backend=false -lockfile=readonly
+          terraform -chdir="$TF_DIR" validate
+
+  plan-pr:
+    name: plan (pull request)
+    if: github.event_name == 'pull_request'
+    needs: checks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ARM_CLIENT_ID: ${{ vars.AZURE_PLAN_CLIENT_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: azure/login (PLAN identity, OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_PLAN_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform -chdir="$TF_DIR" init -lockfile=readonly
+
+      - name: terraform plan
+        id: plan
+        run: |
+          set +e
+          terraform -chdir="$TF_DIR" plan -detailed-exitcode -no-color -out=tfplan > plan.txt 2>&1
+          code=$?
+          set -e
+          cat plan.txt
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          # 0 = no changes, 2 = changes; anything else is a failure.
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi
+
+      - name: plan-secrets guard
+        run: |
+          # The JSON holds any sensitive values in clear, so it stays on the
+          # runner and is removed straight after the check.
+          terraform -chdir="$TF_DIR" show -json tfplan > plan.json
+          python3 scripts/plan_secrets_guard.py < plan.json
+          rm -f plan.json
+
+      - name: keep the plan text for the comment job
+        run: |
+          mkdir -p comment
+          cp plan.txt comment/plan.txt
+          echo "${{ github.event.pull_request.number }}" > comment/pr-number
+          echo "${{ steps.plan.outputs.exitcode }}" > comment/exitcode
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-plan-text
+          path: comment/
+          retention-days: 1
+          if-no-files-found: error
+
+  comment:
+    name: post plan to PR
+    if: github.event_name == 'pull_request'
+    needs: plan-pr
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pr-plan-text
+          path: comment
+
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- terraform-plan -->';
+            const prNumber = Number(fs.readFileSync('comment/pr-number', 'utf8').trim());
+            const exitcode = fs.readFileSync('comment/exitcode', 'utf8').trim();
+            let plan = fs.readFileSync('comment/plan.txt', 'utf8');
+            const limit = 60000;
+            if (plan.length > limit) {
+              plan = plan.slice(0, limit) + '\n... truncated; the full plan is in the run log.';
+            }
+            const summary = exitcode === '0' ? 'No changes.' : 'Changes to apply after merge and approval.';
+            const body = [
+              marker,
+              `### terraform plan: ${summary}`,
+              `Commit ${context.payload.pull_request.head.sha.slice(0, 7)}, run ${context.runId}. ` +
+                'Planned by the read-only PLAN identity; the applied plan is made again on main and approved there.',
+              '',
+              '```',
+              plan,
+              '```',
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNumber });
+            const existing = comments.find(c => c.user.type === 'Bot' && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: prNumber, body });
+            }
+
+  plan-main:
+    name: plan (main, saved for apply)
+    if: github.event_name == 'push'
+    needs: checks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ARM_CLIENT_ID: ${{ vars.AZURE_PLAN_CLIENT_ID }}
+    outputs:
+      has_changes: ${{ steps.plan.outputs.exitcode == '2' }}
+      plan_sha256: ${{ steps.hash.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: azure/login (PLAN identity, OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_PLAN_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform -chdir="$TF_DIR" init -lockfile=readonly
+
+      - name: terraform plan -out
+        id: plan
+        run: |
+          set +e
+          terraform -chdir="$TF_DIR" plan -detailed-exitcode -no-color -out=tfplan > plan.txt 2>&1
+          code=$?
+          set -e
+          cat plan.txt
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          if [ "$code" -ne 0 ] && [ "$code" -ne 2 ]; then exit "$code"; fi
+
+      - name: plan-secrets guard (must pass before anything is uploaded)
+        run: |
+          # The JSON holds any sensitive values in clear, so it stays on the
+          # runner and is removed straight after the check.
+          terraform -chdir="$TF_DIR" show -json tfplan > plan.json
+          python3 scripts/plan_secrets_guard.py < plan.json
+          rm -f plan.json
+
+      - name: hash the saved plan
+        id: hash
+        run: |
+          sha=$(sha256sum "$TF_DIR/tfplan")
+          sha=${sha%% *}
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Saved plan for approval"
+            echo
+            echo "SHA-256 of the plan file the apply job will run: \`$sha\`"
+            echo
+            echo '```'
+            cat plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tfplan
+          path: ${{ env.TF_DIR }}/tfplan
+          retention-days: 1
+          if-no-files-found: error
+
+  apply:
+    name: apply the approved plan
+    if: github.event_name == 'push' && needs.plan-main.outputs.has_changes == 'true'
+    needs: plan-main
+    runs-on: ubuntu-24.04
+    environment: azure-demo
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      ARM_CLIENT_ID: ${{ vars.AZURE_APPLY_CLIENT_ID }}
+      EXPECTED_SHA256: ${{ needs.plan-main.outputs.plan_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tfplan
+          path: ${{ env.TF_DIR }}
+
+      - name: verify this is the plan that was approved
+        run: |
+          actual=$(sha256sum "$TF_DIR/tfplan")
+          actual=${actual%% *}
+          echo "expected (plan-main): $EXPECTED_SHA256"
+          echo "actual   (downloaded): $actual"
+          if [ -z "$EXPECTED_SHA256" ] || [ "$actual" != "$EXPECTED_SHA256" ]; then
+            echo "::error::plan file hash does not match the plan job's; refusing to apply"
+            exit 1
+          fi
+          echo "### Applying plan \`$actual\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: azure/login (APPLY identity, OIDC)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_APPLY_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform init
+        run: terraform -chdir="$TF_DIR" init -lockfile=readonly
+
+      - name: terraform apply (the saved plan, nothing else)
+        run: terraform -chdir="$TF_DIR" apply -input=false -no-color tfplan

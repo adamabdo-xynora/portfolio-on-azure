@@ -44,3 +44,6 @@ crash.*.log
 *.p12
 
 .DS_Store
+
+# Python bytecode from running the guard tests.
+__pycache__/
