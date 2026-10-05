@@ -33,6 +33,9 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # Manual run from main: plan-main only, as the read-only PLAN identity, to
+  # check for drift after an apply. apply never runs on this trigger.
+  workflow_dispatch:
 
 permissions: {}
 
@@ -46,7 +49,7 @@ defaults:
 concurrency:
   # One run per PR at a time (a newer push supersedes an older plan); runs on
   # main queue behind each other and are never cancelled mid-apply.
-  group: terraform-${{ github.event_name == 'push' && 'main' || github.event.pull_request.number }}
+  group: terraform-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'main' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -203,7 +206,7 @@ jobs:
 
   plan-main:
     name: plan (main, saved for apply)
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: checks
     runs-on: ubuntu-24.04
     permissions:
