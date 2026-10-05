@@ -1,0 +1,46 @@
+# Terraform state. Never committed: remote state lives in Azure Storage, and a
+# local copy holds every attribute Terraform knows about, sensitive or not.
+*.tfstate
+*.tfstate.*
+
+# Saved plans embed a copy of state, so they are as sensitive as state.
+*.tfplan
+tfplan
+*.plan
+
+# Provider binaries and module cache, rebuilt by `terraform init`.
+.terraform/
+
+# Variable files can carry environment-specific values. Only the dummy example
+# is committed; real values never live in this repository.
+*.tfvars
+*.tfvars.json
+!example.tfvars
+
+# .terraform.lock.hcl is deliberately NOT ignored: it pins the exact provider
+# versions and their checksums, and CI must install what was reviewed.
+
+# Override files exist to change configuration locally without review.
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# CLI config can hold registry credentials.
+.terraformrc
+terraform.rc
+
+# Crash logs can contain request and response bodies.
+crash.log
+crash.*.log
+
+# Local secrets of any shape. Secret values are set in Key Vault by hand and
+# never touch this tree.
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*.p12
+
+.DS_Store
