@@ -22,13 +22,14 @@
 #   4. Two Entra app registrations, PLAN and APPLY, with service principals
 #      and GitHub OIDC federated credentials. Neither gets a client secret or
 #      a certificate; the script checks and refuses to continue if one exists.
-#   5. One custom role, assignable only inside the resource group, holding the
-#      two listSecrets actions the PLAN identity needs to refresh Container
-#      Apps. See docs/identities.md for why Reader alone is not enough.
-#   6. Role assignments for both identities, all at resource-group scope or
-#      below. Nothing is assigned at subscription scope.
-#   7. Storage Blob Data Reader for you on the state container, so you can
+#   5. Role assignments for both identities, all at resource-group scope or
+#      below. ensure_role aborts if it is ever handed any other scope.
+#   6. Storage Blob Data Reader for you on the state container, so you can
 #      audit state (verification step 8) without being able to write it.
+#
+# Subscription-level writes, all made as you and none granting anything to
+# any identity: registering resource providers (1) and creating the resource
+# group (2), which is a write at subscription scope by definition.
 #
 # What it does NOT create: anything holding a secret value. The Key Vault,
 # managed identities and apps come from Terraform; secret values are set by
@@ -59,6 +60,9 @@ readonly STATE_ACCOUNT="stportfolioazuretf"
 readonly STATE_CONTAINER="tfstate"
 readonly STATE_LOCK_NAME="do-not-delete-terraform-state"
 
+# The ceiling for every role assignment this script makes (see ensure_role).
+readonly RG_SCOPE="/subscriptions/${SUBSCRIPTION_ID}/resourceGroups/${RESOURCE_GROUP}"
+
 readonly GITHUB_REPO="adamabdo-xynora/portfolio-on-azure"
 readonly DEPLOY_ENVIRONMENT="azure-demo"
 
@@ -74,7 +78,6 @@ readonly OIDC_AUDIENCE="api://AzureADTokenExchange"
 
 readonly PLAN_APP_NAME="github-portfolio-on-azure-plan"
 readonly APPLY_APP_NAME="github-portfolio-on-azure-apply"
-readonly SECRET_REF_ROLE_NAME="Container Apps Secret Reference Reader (portfolio-on-azure)"
 
 readonly TAGS=(project=portfolio-on-azure owner=adam env=demo)
 
@@ -119,7 +122,7 @@ ok() { printf '    ok: %s\n' "$*"; }
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 
 # Retry a command a few times. Entra and ARM are eventually consistent: a
-# service principal or a custom role created a second ago can be "not found"
+# service principal created a second ago can be "not found"
 # by the role assignment API for a short while.
 retry() {
   local attempt
@@ -198,6 +201,8 @@ ensure_resource_group() {
   log "Resource group"
   az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --tags "${TAGS[@]}" --output none
   RG_ID="$(az group show --name "$RESOURCE_GROUP" --query id -o tsv)"
+  [[ "$(tr '[:upper:]' '[:lower:]' <<<"$RG_ID")" == "$(tr '[:upper:]' '[:lower:]' <<<"$RG_SCOPE")" ]] \
+    || die "resource group ID '$RG_ID' does not match the configured scope '$RG_SCOPE'"
   ok "$RG_ID"
 }
 
@@ -414,57 +419,24 @@ ensure_ci_identities() {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Custom role for the PLAN identity.
-# ---------------------------------------------------------------------------
-
-ensure_secret_reference_role() {
-  log "Custom role: $SECRET_REF_ROLE_NAME"
-  # azurerm refreshes a Container App or Job by calling listSecrets and fails
-  # the whole plan if that is denied. Reader has only */read, and listSecrets
-  # is an action, so a Reader-only plan breaks as soon as the apps exist.
-  # These apps hold no secret values: every secret is a Key Vault reference,
-  # so listSecrets returns the vault URL and the identity, not a value.
-  # (Verified against the live apps in verification step 5.)
-  local existing id_line=""
-  existing="$(az role definition list --custom-role-only true --scope "$RG_ID" \
-    --query "[?roleName=='${SECRET_REF_ROLE_NAME}'].name | [0]" -o tsv)"
-  # An update must name the definition it replaces.
-  [[ -n "$existing" ]] && id_line="\"Id\": \"${existing}\","
-  cat >"$WORK_DIR/role.json" <<JSON
-{
-  ${id_line}
-  "Name": "${SECRET_REF_ROLE_NAME}",
-  "IsCustom": true,
-  "Description": "Lets terraform plan refresh Container Apps and Jobs whose secrets are Key Vault references. Grants listSecrets only: no write, no delete.",
-  "Actions": [
-    "Microsoft.App/containerApps/listSecrets/action",
-    "Microsoft.App/jobs/listSecrets/action"
-  ],
-  "NotActions": [],
-  "DataActions": [],
-  "NotDataActions": [],
-  "AssignableScopes": ["${RG_ID}"]
-}
-JSON
-  if [[ -z "$existing" ]]; then
-    az role definition create --role-definition "@$WORK_DIR/role.json" --output none
-  else
-    az role definition update --role-definition "@$WORK_DIR/role.json" --output none
-  fi
-  SECRET_REF_ROLE_ID="$(retry az role definition list --custom-role-only true --scope "$RG_ID" \
-    --query "[?roleName=='${SECRET_REF_ROLE_NAME}'].name | [0]" -o tsv)"
-  [[ -n "$SECRET_REF_ROLE_ID" ]] || die "custom role did not appear"
-  ok "role definition $SECRET_REF_ROLE_ID, assignable only at $RG_ID"
-}
-
-# ---------------------------------------------------------------------------
-# 6. Role assignments.
+# 5. Role assignments.
 # ---------------------------------------------------------------------------
 
 # ensure_role <principal-object-id> <principal-type> <role-definition-guid> <scope> <description> [condition]
 ensure_role() {
   local principal="$1" ptype="$2" role="$3" scope="$4" description="$5" condition="${6:-}"
   local existing_id existing_condition
+
+  # Hard boundary: nothing in this project is assigned above the resource
+  # group. The comparison is against a constant built from the configuration
+  # above, not against a value read back from Azure, so an empty or unexpected
+  # lookup cannot widen it. This aborts the whole run; it never skips.
+  local scope_lc rg_lc
+  scope_lc="$(tr '[:upper:]' '[:lower:]' <<<"$scope")"
+  rg_lc="$(tr '[:upper:]' '[:lower:]' <<<"$RG_SCOPE")"
+  if [[ "$scope_lc" != "$rg_lc" && "$scope_lc" != "$rg_lc"/* ]]; then
+    die "refusing to assign role $role to $principal at scope '$scope': every assignment must be at or below $RG_SCOPE. Nothing in this project is assigned at subscription scope."
+  fi
 
   existing_id="$(az role assignment list --assignee "$principal" --scope "$scope" \
     --query "[?scope=='${scope}' && ends_with(roleDefinitionId, '${role}')].id | [0]" -o tsv)"
@@ -501,8 +473,6 @@ ensure_role_assignments() {
   log "Role assignments: PLAN"
   ensure_role "$PLAN_SP_ID" ServicePrincipal "$ROLE_READER" "$RG_ID" \
     "PLAN: Reader on the resource group, to refresh state"
-  ensure_role "$PLAN_SP_ID" ServicePrincipal "$SECRET_REF_ROLE_ID" "$RG_ID" \
-    "PLAN: listSecrets on Container Apps and Jobs, which azurerm needs to refresh them"
   ensure_role "$PLAN_SP_ID" ServicePrincipal "$ROLE_BLOB_DATA_CONTRIBUTOR" "$STATE_CONTAINER_SCOPE" \
     "PLAN: write on the state container only, because taking the state lock is a write"
 
@@ -543,7 +513,6 @@ main() {
   ensure_resource_group
   ensure_state_storage
   ensure_ci_identities
-  ensure_secret_reference_role
   ensure_role_assignments
   summary
 }

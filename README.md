@@ -13,4 +13,5 @@ deployment. Until then:
 - [`bootstrap/`](bootstrap/): what Terraform cannot create for itself
 - [`docs/identities.md`](docs/identities.md): every identity, role and scope, and why
 - [`docs/secrets.md`](docs/secrets.md): how secret values are set without touching Terraform, GitHub or this repo
+- [`docs/verification.md`](docs/verification.md): what must be proven before this README claims it
 - [`docs/teardown.md`](docs/teardown.md): how to remove all of it

@@ -15,7 +15,6 @@ RG=rg-portfolio-on-azure
 SA=stportfolioazuretf
 KV=kv-portfolio-on-azure
 LOCATION=canadacentral
-SCOPE_RG=$(az group show -n "$RG" --query id -o tsv)
 ME=$(az ad signed-in-user show --query id -o tsv)
 ```
 
@@ -70,8 +69,6 @@ for app in github-portfolio-on-azure-plan github-portfolio-on-azure-apply; do
   az rest --method DELETE --url "https://graph.microsoft.com/v1.0/directory/deletedItems/$obj_id"
 done
 
-az role definition delete --name "Container Apps Secret Reference Reader (portfolio-on-azure)" \
-  --scope "$SCOPE_RG"
 ```
 
 ## 4. Lift the lock, then delete the resource group
@@ -126,7 +123,6 @@ az resource list --tag project=portfolio-on-azure -o table
 az keyvault list-deleted -o table
 az monitor log-analytics workspace list-deleted-workspaces -o table
 az ad app list --display-name github-portfolio-on-azure -o table
-az role definition list --custom-role-only true -o table
 az role assignment list --all --query "[?principalType=='ServicePrincipal' && contains(scope, '$RG')]" -o table
 az consumption budget list -o table
 ```

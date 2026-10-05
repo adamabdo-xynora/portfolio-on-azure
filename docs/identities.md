@@ -1,9 +1,11 @@
 # Identities and roles
 
 Every identity in this project, what it may do, where, and why. Nothing is
-assigned at subscription scope. The only subscription-level actions in the
-whole project (registering resource providers and creating one custom role
-definition) are done once by a human in `bootstrap/bootstrap.sh`.
+assigned at subscription scope, and `bootstrap.sh` aborts if any role
+assignment is ever aimed above the resource group. Its only
+subscription-level writes are registering resource providers and creating
+the resource group itself. A human makes both, once, and neither grants
+anything to any identity.
 
 Scopes below:
 
@@ -41,8 +43,18 @@ from this repository.
 | Role | Scope | Why |
 |---|---|---|
 | Reader | RG | `terraform plan` refreshes every resource. Reading is all a plan needs. |
-| Container Apps Secret Reference Reader *(custom)* | RG | Two actions: `Microsoft.App/containerApps/listSecrets/action` and `Microsoft.App/jobs/listSecrets/action`. The azurerm provider (5.8.0) refreshes a Container App or Job by calling `listSecrets`, and fails the whole plan if that call is denied. Reader holds only `*/read`, and `listSecrets` is an action, not a read. These apps hold no secret values (every secret is a Key Vault reference), so the call returns a vault URL and an identity. The role definition is assignable only inside the RG. |
 | Storage Blob Data Contributor | state container | Terraform takes a lease on the state blob before planning, so concurrent runs cannot interleave. Taking a lease is a write. This identity never writes the state itself, because it never applies. |
+
+Nothing else. In particular, the PLAN identity has no `listSecrets`
+permission on Container Apps or Jobs. That is why those two resources are
+managed with `azapi_resource`, whose refresh is a plain GET, rather than
+azurerm, whose refresh calls `listSecrets`. See "Corrections" below.
+
+What Reader does allow, stated plainly: it can query the Log Analytics
+workspace (`workspaces/query/read` falls under `*/read`), so this identity
+can read the apps' logs and the Key Vault audit events. Neither app logs
+secret values by design, and audit events record who read which secret,
+not its value.
 
 Federated credentials, each used by exactly one job:
 
@@ -123,6 +135,19 @@ is read access to secrets in this one resource group's vault. Narrowing it
 further means constraining `PrincipalId`, which would hard-code managed
 identity IDs that do not exist until Terraform creates them.
 
+#### What APPLY can reach indirectly
+
+CI never holds Key Vault Secrets Officer, but that is not the whole story.
+APPLY holds Contributor on the RG, which includes
+`Microsoft.App/containerApps/listSecrets/action`,
+`Microsoft.App/jobs/listSecrets/action` and `Microsoft.App/jobs/start/action`.
+Microsoft documents that starting a job with an override template can read
+that job's secrets. More basically, any identity that can deploy an app can
+deploy code that prints its environment. Removing those actions from APPLY
+would not change that. The control on APPLY is the one GitHub and Entra ID
+both enforce: it runs only a saved plan that a reviewer approved, from
+`main`, in the `azure-demo` environment.
+
 ## You (the operator)
 
 | Role | Scope | Granted by | Why |
@@ -134,3 +159,60 @@ identity IDs that do not exist until Terraform creates them.
 ## The managed identities
 
 Added with the shared resources (PR 3) and documented here when they exist.
+
+## Decisions and corrections
+
+### Correction (2026-10-04): what `listSecrets` returns
+
+An earlier revision of this project (the first commit on PR #1) gave the
+PLAN identity a custom role, "Container Apps Secret Reference Reader",
+holding `Microsoft.App/containerApps/listSecrets/action` and
+`Microsoft.App/jobs/listSecrets/action`. It justified the role by saying
+that for a secret that is a Key Vault reference, `listSecrets` returns
+only the vault URL and the identity, not the value. **That claim was wrong.**
+It was written from memory, not checked against Microsoft's documentation.
+The role was removed before anything was deployed.
+
+What the evidence shows:
+
+- Microsoft's Container Apps documentation,
+  [Manage secrets](https://learn.microsoft.com/en-us/azure/container-apps/manage-secrets)
+  (updated 2026-09-11), says: *"Azure Container Apps exposes separate
+  `listSecrets` operations for container apps, jobs, and Dapr components.
+  These operations return secret values in plain text. Grant these
+  permissions only to identities that need to read secret values."* Neither
+  that page nor the
+  [List Secrets REST reference](https://learn.microsoft.com/en-us/rest/api/resource-manager/containerapps/container-apps/list-secrets)
+  excludes Key Vault references. The response schema has `value` alongside
+  `keyVaultUrl` and `identity`.
+- Microsoft's REST specification for API version 2026-07-01
+  (`specification/app/resource-manager/Microsoft.App/ContainerApps/stable/2026-07-01/openapi.json`)
+  marks `value` in the `listSecrets` response as `readOnly: true,
+  x-ms-secret: true`. Autorest defines `x-ms-secret` this way: *"Secrets
+  should never expose on a GET. If a secret does need to be returned after
+  the fact, a POST api can be used."* `listSecrets` is that POST.
+- The azurerm provider (5.8.0) does not write the value to state for a
+  Key Vault reference: `FlattenContainerAppSecrets` and
+  `FlattenContainerAppJobSecrets` keep `value` only when `KeyVaultURL` is
+  nil. But the identity making the call still receives the response, and
+  the PLAN identity runs on pull-request code. Anyone able to push a branch
+  could add a step that calls `listSecrets` with its token.
+
+So the permission could expose secret values, and the PLAN identity must not
+hold it. The replacement:
+
+- PLAN holds **Reader** only, plus its lease on the state container.
+- The Container App and the Container Apps Job are managed with
+  `azapi_resource`. Its refresh (azapi 2.13.0, `Read()` in
+  `internal/services/azapi_resource.go`) makes one call, `client.Get`. In
+  the GET/PUT body schema, `Secret.value` is `x-ms-secret: true` with
+  `x-ms-mutability: ["update", "create"]`, with no `read`, so a GET never
+  returns it.
+- The Log Analytics workspace is also managed with azapi, for the related
+  reason that azurerm's refresh copies the workspace's shared keys into state.
+
+The rule that follows: where azurerm's refresh would touch secret material,
+the resource is managed with azapi. Because azapi resources can show a
+perpetual diff when the body read back differs from the body sent, each
+first apply is followed by a fresh plan that must show zero changes
+(`docs/verification.md`).
