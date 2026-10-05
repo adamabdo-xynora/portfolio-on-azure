@@ -154,11 +154,33 @@ both enforce: it runs only a saved plan that a reviewer approved, from
 |---|---|---|---|
 | Owner | subscription | the free account | You created the subscription. Bootstrap and teardown run as you. |
 | Storage Blob Data Reader | state container | `bootstrap.sh` | Read-only access to state, to audit it, for example to search it for secret values. You cannot write state; only CI does. |
-| Key Vault Secrets Officer | the Key Vault | one command, after the shared-resources apply (`docs/secrets.md`) | To set secret values by hand. CI never holds this role, so no pipeline can read or write a secret value. |
+| Key Vault Secrets Officer | each vault: `kv-poa-webhook-guard`, `kv-poa-rag-receipts` | one command per vault, after the shared-resources apply (`docs/secrets.md`) | To set secret values by hand. No CI identity holds this role or any Key Vault data role, so no pipeline can write a secret or read one directly. APPLY's indirect reach is described above. |
 
 ## The managed identities
 
-Added with the shared resources (PR 3) and documented here when they exist.
+User-assigned, one per workload, created by Terraform
+(`terraform/identities.tf`). Each workload also has **its own Key Vault**
+(`terraform/keyvault.tf`), and each identity can read **only its own
+vault**.
+
+| Identity | Used by | Role | Scope | Secrets in that vault |
+|---|---|---|---|---|
+| `id-webhook-guard` | the webhook-guard Container App | Key Vault Secrets User | the vault `kv-poa-webhook-guard` | `webhook-secret` |
+| `id-rag-receipts` | the rag-receipts Container Apps Job | Key Vault Secrets User | the vault `kv-poa-rag-receipts` | `voyage-api-key`, plus `anthropic-api-key` only if a full eval run is approved |
+
+**Why a vault per workload.** It is Microsoft's recommendation (see
+"Change (2026-10-05)" below), and it means neither workload can read the
+other's secrets: the webhook receiver cannot read the Voyage or Anthropic
+keys, and the eval job cannot read the webhook signing secret. Grants are
+at vault scope, so they are created with the vaults, before any secret is
+set or any app references one. Nothing has to wait on role-assignment
+propagation when an app first starts.
+
+Key Vault Secrets User can read secret values and nothing else. It cannot
+write or delete secrets, or change the vault. It is also the only role the
+APPLY identity is allowed to assign (see the RBAC Administrator condition
+above). Each assignment is created with
+`principal_type = "ServicePrincipal"`, which that condition requires.
 
 ## Decisions and corrections
 
@@ -217,8 +239,58 @@ perpetual diff when the body read back differs from the body sent, each
 first apply is followed by a fresh plan that must show zero changes
 (`docs/verification.md`).
 
+### Change (2026-10-05): one Key Vault per workload
+
+Before anything was applied, the shared-resources pull request (#4) went
+through two designs, both replaced:
+
+1. **One vault, vault-scope grants.** Each identity could read every
+   secret in the vault: the webhook receiver could read the Voyage key, and
+   the eval job the webhook signing secret.
+2. **One vault, per-secret grants.** This limited each identity to its own
+   secrets. Its grants needed the secrets to exist first, so they would have
+   been created in the same apply as the apps, where an app can start before
+   a new role assignment takes effect.
+
+Both were replaced by a vault per workload, because that is what Microsoft
+recommends. Its Key Vault RBAC guide,
+[Grant permission to applications to access an Azure key vault using Azure RBAC](https://learn.microsoft.com/en-us/azure/key-vault/general/rbac-guide)
+(updated 2026-08-21), section *Best Practices for individual keys,
+secrets, and certificates role assignments*, says:
+
+> Our recommendation is to use a vault per application per environment
+> (Development, Pre-Production, and Production) with roles assigned at the
+> key vault scope.
+>
+> Assigning roles on individual keys, secrets and certificates is not
+> recommended.
+
+The listed exceptions (secrets that individual users must read, and
+secrets shared between applications) do not apply here.
+
+The result: two vaults, `kv-poa-webhook-guard` and `kv-poa-rag-receipts`,
+each Standard, RBAC, 7-day soft delete, purge protection off, each with
+its own AuditEvent diagnostic setting. Each workload's identity is Key
+Vault Secrets User on its own vault only. Access is the same as with
+per-secret grants (each identity reads only its own secrets), and it now
+follows Microsoft's guidance. The grants also exist before any secret or
+app does. Key Vault has no per-vault charge, so the second vault costs
+nothing beyond its operations.
+
 ### Trade-offs
 
+- **Key Vault purge protection is off** on both vaults, with 7-day
+  soft-delete retention, so teardown can purge them the same day. A production deployment
+  would turn purge protection on: then no one, including an attacker with
+  full rights, can permanently delete a deleted vault before its retention
+  ends, so it always stays recoverable.
+- **The Container Apps environment is the Consumption-only type,** which
+  Microsoft labels legacy, because Microsoft states it has no environment
+  cost. A production deployment would use a workload-profiles environment.
+- **The Log Analytics workspace has a 0.1 GB/day cap,** to stay inside the
+  5 GB/month free grant even if the cap is hit every day. Once the cap is
+  reached, audit events stop until the daily reset. A production audit
+  workspace would not be capped this way.
 - **The state account allows public network access.** GitHub-hosted
   runners reach it over the internet. Access is Entra ID only, with shared
   keys off. A production deployment would use a private endpoint with

@@ -31,11 +31,11 @@
 # any identity: registering resource providers (1) and creating the resource
 # group (2), which is a write at subscription scope by definition.
 #
-# What it does NOT create: anything holding a secret value. The Key Vault,
-# managed identities and apps come from Terraform; secret values are set by
-# hand (docs/secrets.md). The Key Vault Secrets Officer assignment for you is a
-# separate one-line command run after the shared-resources apply, because the
-# vault does not exist yet when this runs.
+# What it does NOT create: anything holding a secret value. The Key Vaults
+# (one per workload), managed identities and apps come from Terraform; secret
+# values are set by hand (docs/secrets.md). Your Key Vault Secrets Officer
+# assignments are one-line commands, one per vault, run after the
+# shared-resources apply, because the vaults do not exist yet when this runs.
 #
 # Usage:
 #   az login
@@ -525,8 +525,8 @@ summary() {
   printf '    AZURE_PLAN_CLIENT_ID=%s\n' "$PLAN_APP_ID"
   printf '    AZURE_APPLY_CLIENT_ID=%s\n' "$APPLY_APP_ID"
   printf '\n    bootstrap/github.sh sets these and creates the %s environment.\n' "$DEPLOY_ENVIRONMENT"
-  printf '\n    After the shared-resources apply creates the Key Vault, grant yourself\n'
-  printf '    Key Vault Secrets Officer on it (docs/secrets.md has the command).\n'
+  printf '\n    After the shared-resources apply creates the two Key Vaults, grant yourself\n'
+  printf '    Key Vault Secrets Officer on each (docs/secrets.md has the commands).\n'
 }
 
 main() {
