@@ -277,6 +277,48 @@ follows Microsoft's guidance. The grants also exist before any secret or
 app does. Key Vault has no per-vault charge, so the second vault costs
 nothing beyond its operations.
 
+### Correction (2026-10-05): the Container Apps environment type
+
+The shared-resources pull request (#4) declared the Container Apps
+environment with no `workload_profile` block, and its comments, this
+document and the README cost table said that this creates the legacy
+**Consumption-only** environment type. They quoted Microsoft's statement
+about that type: *"There's no cost associated with the Container Apps
+environment."* **That claim was wrong.** It rested on how the type used to
+be selected, not on what Azure creates today.
+
+What the evidence shows:
+
+- The first fresh plan after the apply (run as the operator, read-only)
+  wanted to change the environment in place, removing a `workload_profile`
+  named `Consumption` that the configuration never declared.
+- Reading the environment from Azure (Microsoft.App API version 2026-07-01)
+  shows `workloadProfiles: [{ name: "Consumption", workloadProfileType:
+  "Consumption" }]`, with no Dedicated profile, no private endpoint
+  connections, no VNet configuration, and no maintenance configurations.
+- azurerm 5.8.0 creates environments with API version 2025-07-01
+  (`container_app_environment_resource.go`) and sends no workload profiles
+  when none are declared. Azure created a workload-profiles environment
+  with the default Consumption profile. Microsoft's
+  [environments page](https://learn.microsoft.com/en-us/azure/container-apps/environment)
+  lists workload profiles as the default type and Consumption-only as legacy.
+
+The fix declares the Consumption profile explicitly, so the configuration
+matches what exists and a fresh plan is clean. The cost conclusion is
+unchanged, but it now rests on the statement that applies to this type,
+from Microsoft's
+[Container Apps billing](https://learn.microsoft.com/en-us/azure/container-apps/billing)
+documentation: *"You aren't billed any plan management charges unless you
+use a Dedicated workload profile in your environment."* Private endpoints
+and planned maintenance carry the same charge, and this environment has
+neither. Whether the "Environment Management Hour" meter stays at zero will
+be checked against actual usage data.
+
+The same pull request removes the `deploying_identity_object_id` output.
+Its value depends on who runs the plan, so a plan run by anyone but the
+PLAN identity always showed a change. That made a local zero-change check
+impossible.
+
 ### Trade-offs
 
 - **Key Vault purge protection is off** on both vaults, with 7-day
@@ -284,9 +326,6 @@ nothing beyond its operations.
   would turn purge protection on: then no one, including an attacker with
   full rights, can permanently delete a deleted vault before its retention
   ends, so it always stays recoverable.
-- **The Container Apps environment is the Consumption-only type,** which
-  Microsoft labels legacy, because Microsoft states it has no environment
-  cost. A production deployment would use a workload-profiles environment.
 - **The Log Analytics workspace has a 0.1 GB/day cap,** to stay inside the
   5 GB/month free grant even if the cap is hit every day. Once the cap is
   reached, audit events stop until the daily reset. A production audit

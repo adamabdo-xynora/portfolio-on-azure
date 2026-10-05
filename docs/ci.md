@@ -7,12 +7,17 @@ One workflow, [`.github/workflows/terraform.yml`](../.github/workflows/terraform
 | `checks` | every PR and push to main | none | `contents: read` | shellcheck the bootstrap scripts, test the plan-secrets guard, `terraform fmt -check`, `terraform validate` |
 | `plan-pr` | pull requests | PLAN | `contents: read`, `id-token: write` | `terraform plan`, plan-secrets guard, hands the plan text to `comment` |
 | `comment` | pull requests | none | `pull-requests: write` | posts or updates one plan comment on the PR |
-| `plan-main` | push to main | PLAN | `contents: read`, `id-token: write` | `terraform plan -out`, plan-secrets guard, SHA-256 of the plan file, uploads it |
-| `apply` | push to main, only if the plan has changes | APPLY, in environment `azure-demo` | `contents: read`, `id-token: write` | waits for approval, checks the plan file's SHA-256, applies that file |
+| `plan-main` | push to main, or a manual run (`workflow_dispatch`) | PLAN | `contents: read`, `id-token: write` | `terraform plan -out`, plan-secrets guard, SHA-256 of the plan file, uploads it |
+| `apply` | push to main only, and only if the plan has changes; never on a manual run | APPLY, in environment `azure-demo` | `contents: read`, `id-token: write` | waits for approval, checks the plan file's SHA-256, applies that file |
 
 The workflow grants nothing at the top level (`permissions: {}`). Each job
 asks only for what it uses. The job that can write to the pull request has no
 Azure token, and the jobs with Azure tokens cannot write to the pull request.
+
+**Manual drift check.** `gh workflow run terraform.yml --ref main` runs
+`checks` and `plan-main` only, as the read-only PLAN identity. It is used
+after each apply to confirm a fresh plan shows no changes. `apply` is
+conditioned on a push, so a manual run cannot apply anything.
 
 ## What gets applied is what was approved
 
