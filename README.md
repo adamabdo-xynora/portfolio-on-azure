@@ -45,7 +45,6 @@ and cost data lags usage by 8–24 hours.
 | Key Vault `kv-portfolio-on-azure` | Standard | C$0.0425 per 10,000 secret operations; no monthly fee per vault | none | **< C$0.05**: a few thousand reads (the apps refresh their secret references; CI refreshes metadata) |
 | Diagnostic settings ×2 (Key Vault audit, Container Apps logs) | n/a | no charge for the setting; the logs are billed as Log Analytics ingestion above | — | **C$0.00** (counted under Log Analytics) |
 | User-assigned managed identities ×2 | n/a | no charge | n/a | **C$0.00** |
-| Role assignments ×2 (Key Vault Secrets User) | n/a | no charge | n/a | **C$0.00** |
 | Container Apps environment `cae-portfolio-on-azure` | **Consumption only**: no workload profiles, no private endpoint, no planned maintenance | Microsoft: *"There's no cost associated with the Container Apps environment"* for this type. The C$0.17/hour "Environment Management Hour" meter (from 2026-09-01) *"applies to the Dedicated plan, private endpoint, and planned maintenance"*, none of which is used | n/a | **C$0.00** (to be confirmed from actual usage data about 24 hours after the apply) |
 | Budget `budget-portfolio-on-azure` | C$10/month, alerts at 50/80/100% of actual cost | no charge | n/a | **C$0.00** |
 
@@ -61,7 +60,8 @@ workspace's daily reset, including Key Vault audit events. A bank would not
 cap an audit workspace this way.
 
 PR 4 (webhook-guard) and PR 5 (rag-receipts job) add their rows here before
-their first apply.
+their first apply, including their per-secret Key Vault role assignments
+(no charge).
 
 Sources, all read 2026-10-04:
 [Container Apps pricing](https://azure.microsoft.com/en-us/pricing/details/container-apps/),

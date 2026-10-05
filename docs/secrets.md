@@ -22,10 +22,14 @@ those places.
 A Container App that references a Key Vault secret that does not exist
 fails to provision. So:
 
-1. The shared-resources PR is applied (vault, identities, role assignments).
+1. The shared-resources PR is applied: the vault and the two managed
+   identities, with no access to any secret yet.
 2. You grant yourself write access to secret values (below).
 3. You set `webhook-secret` and `voyage-api-key`.
-4. Only then do the webhook-guard and rag-receipts PRs go in.
+4. Only then do the webhook-guard and rag-receipts PRs go in. Each grants
+   its identity Key Vault Secrets User on its own secret only. A
+   secret-scope role assignment needs the secret to exist, which is a
+   second reason for this order.
 
 ## 1. Grant yourself Key Vault Secrets Officer (once)
 
