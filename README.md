@@ -60,10 +60,20 @@ The cost of the cap: once it is reached, collection stops until the
 workspace's daily reset, including Key Vault audit events. A bank would not
 cap an audit workspace this way.
 
-PR 4 (webhook-guard) and PR 5 (rag-receipts job) add their rows here before
-their first apply.
+### PR 4: webhook-guard Container App
 
-Sources, all read 2026-10-04:
+| Resource | SKU / tier | Pricing model | Free grant | Expected monthly cost at demo usage |
+|---|---|---|---|---|
+| Container App `ca-webhook-guard` | Consumption profile, 0.25 vCPU / 0.5 GiB, **min 0 / max 1 replicas**, external HTTPS ingress | Per second while a replica runs: US$0.000034/vCPU-s and US$0.000004/GiB-s (about C$0.000048 and C$0.0000057; the API publishes CAD rounded to 4 decimals, so these are converted at the request meter's ratio, 1.4165). Requests C$0.5666 per million. Nothing while scaled to zero; health-probe requests are not billed. | **180,000 vCPU-s, 360,000 GiB-s and 2 million requests per subscription per month**: at this size, about 200 replica-hours | **C$0.00**: a replica runs only during tests plus the scale-in cooldown, a few hours a month at most. Outside the grant it would be about C$0.054 per replica-hour. |
+| Key Vault reads by the app | (vault above) | C$0.0425 per 10,000 operations | none | **< C$0.01**: the platform reads the secret when a revision starts and refreshes it periodically |
+| Images | public GHCR, pulled by digest | no registry in Azure | — | **C$0.00** |
+
+**PR 4 total: C$0.00 expected, inside the Container Apps free grant.**
+Nothing in it needs the free account upgraded.
+
+PR 5 (rag-receipts job) adds its rows here before its first apply.
+
+Sources, read 2026-10-04 (Container Apps per-second rates re-read 2026-10-05):
 [Container Apps pricing](https://azure.microsoft.com/en-us/pricing/details/container-apps/),
 [Container Apps environment types](https://learn.microsoft.com/en-us/azure/container-apps/environment),
 [Container Apps billing](https://learn.microsoft.com/en-us/azure/container-apps/billing),

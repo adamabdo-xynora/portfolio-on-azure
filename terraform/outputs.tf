@@ -34,3 +34,8 @@ output "container_app_environment_id" {
   description = "Container Apps environment (Consumption profile only)."
   value       = azurerm_container_app_environment.this.id
 }
+
+output "webhook_guard_fqdn" {
+  description = "Public HTTPS host name of the webhook-guard Container App."
+  value       = azapi_resource.webhook_guard.output.properties.configuration.ingress.fqdn
+}
