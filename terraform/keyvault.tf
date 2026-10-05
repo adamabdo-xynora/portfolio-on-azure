@@ -1,12 +1,14 @@
-# Key Vault for the apps' secrets. Terraform creates the vault and decides
-# who may read it; it never holds a secret value (docs/secrets.md).
-resource "azurerm_key_vault" "this" {
-  name                = "kv-portfolio-on-azure"
+# One Key Vault per workload. Terraform creates each vault and decides who may
+# read it; it never holds a secret value (docs/secrets.md).
+resource "azurerm_key_vault" "workload" {
+  for_each = local.workloads
+
+  name                = each.value.key_vault_name
   location            = local.location
   resource_group_name = data.azurerm_resource_group.this.name
   tenant_id           = data.azurerm_client_config.current.tenant_id
   sku_name            = "standard"
-  tags                = local.tags
+  tags                = merge(local.tags, { workload = each.key })
 
   # Azure RBAC, not access policies: who can read a secret is a role
   # assignment, visible in the same place as every other permission, and
@@ -28,11 +30,14 @@ resource "azurerm_key_vault" "this" {
   public_network_access_enabled = true
 }
 
-# Every Key Vault request, including each secret read by a managed identity,
-# is recorded as an AuditEvent in Log Analytics (table AzureDiagnostics).
+# Every request to either vault, including each secret read by a managed
+# identity, is recorded as an AuditEvent in Log Analytics (table
+# AzureDiagnostics).
 resource "azurerm_monitor_diagnostic_setting" "key_vault" {
+  for_each = local.workloads
+
   name                       = "audit-to-log-analytics"
-  target_resource_id         = azurerm_key_vault.this.id
+  target_resource_id         = azurerm_key_vault.workload[each.key].id
   log_analytics_workspace_id = azapi_resource.log_analytics.id
 
   enabled_log {

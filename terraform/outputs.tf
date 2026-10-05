@@ -23,29 +23,15 @@ output "log_analytics_customer_id" {
   value       = azapi_resource.log_analytics.output.properties.customerId
 }
 
-output "key_vault_name" {
-  description = "Vault that holds the apps' secrets. Values are set by hand (docs/secrets.md)."
-  value       = azurerm_key_vault.this.name
-}
-
-output "key_vault_uri" {
-  description = "Base URI for the apps' Key Vault references."
-  value       = azurerm_key_vault.this.vault_uri
-}
-
-output "webhook_guard_identity" {
-  description = "Managed identity webhook-guard reads its secret with."
+output "workloads" {
+  description = "Per workload: its Key Vault (secret values are set by hand, docs/secrets.md) and the managed identity that reads it."
   value = {
-    id           = azurerm_user_assigned_identity.webhook_guard.id
-    principal_id = azurerm_user_assigned_identity.webhook_guard.principal_id
-  }
-}
-
-output "rag_receipts_identity" {
-  description = "Managed identity the rag-receipts job reads its keys with."
-  value = {
-    id           = azurerm_user_assigned_identity.rag_receipts.id
-    principal_id = azurerm_user_assigned_identity.rag_receipts.principal_id
+    for name, _ in local.workloads : name => {
+      key_vault_name        = azurerm_key_vault.workload[name].name
+      key_vault_uri         = azurerm_key_vault.workload[name].vault_uri
+      identity_id           = azurerm_user_assigned_identity.workload[name].id
+      identity_principal_id = azurerm_user_assigned_identity.workload[name].principal_id
+    }
   }
 }
 

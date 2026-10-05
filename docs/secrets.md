@@ -1,8 +1,8 @@
 # Secrets
 
 Secret values never pass through Terraform, GitHub or this repository.
-Terraform creates the vault and decides who may read it. A human sets the
-values, using the commands below, after the shared-resources apply and
+Terraform creates the vaults and decides who may read them. A human sets
+the values, using the commands below, after the shared-resources apply and
 before the apps that reference them.
 
 Why not Terraform: an `azurerm_key_vault_secret` keeps its value in state,
@@ -11,36 +11,43 @@ readable by anyone with read access to the state container, and a saved plan
 embeds a copy of state. A value Terraform never sees cannot leak from any of
 those places.
 
-| Secret name | Read by | Becomes | Needed for |
-|---|---|---|---|
-| `webhook-secret` | webhook-guard's managed identity | `WEBHOOK_SECRET` | the receiver to start at all |
-| `voyage-api-key` | rag-receipts' managed identity | `VOYAGE_API_KEY` | every eval run, including `--calibrate` |
-| `anthropic-api-key` | rag-receipts' managed identity | `ANTHROPIC_API_KEY` | the full eval only; not set, and not referenced by the job, until a full run is approved |
+## One vault per workload
+
+| Vault | Secret name | Read by | Becomes | Needed for |
+|---|---|---|---|---|
+| `kv-poa-webhook-guard` | `webhook-secret` | `id-webhook-guard` | `WEBHOOK_SECRET` | the receiver to start at all |
+| `kv-poa-rag-receipts` | `voyage-api-key` | `id-rag-receipts` | `VOYAGE_API_KEY` | every eval run, including `--calibrate` |
+| `kv-poa-rag-receipts` | `anthropic-api-key` | `id-rag-receipts` | `ANTHROPIC_API_KEY` | the full eval only; not set, and not referenced by the job, until a full run is approved |
+
+Each identity is Key Vault Secrets User on its own vault only, so the
+webhook receiver cannot read the API keys and the eval job cannot read the
+signing secret (`docs/identities.md`).
 
 ## Order matters
 
 A Container App that references a Key Vault secret that does not exist
 fails to provision. So:
 
-1. The shared-resources PR is applied: the vault and the two managed
-   identities, with no access to any secret yet.
-2. You grant yourself write access to secret values (below).
+1. The shared-resources PR is applied: both vaults, both identities, and
+   each identity's read access to its own vault.
+2. You grant yourself write access to secret values on both vaults (below).
 3. You set `webhook-secret` and `voyage-api-key`.
-4. Only then do the webhook-guard and rag-receipts PRs go in. Each grants
-   its identity Key Vault Secrets User on its own secret only. A
-   secret-scope role assignment needs the secret to exist, which is a
-   second reason for this order.
+4. Only then do the webhook-guard and rag-receipts PRs go in.
 
-## 1. Grant yourself Key Vault Secrets Officer (once)
+## 1. Grant yourself Key Vault Secrets Officer (once per vault)
 
-Scoped to this one vault. CI never holds this role.
+Each command is scoped to one vault. No CI identity holds this role.
 
 ```bash
-az role assignment create --assignee-object-id "$(az ad signed-in-user show --query id -o tsv)" --assignee-principal-type User --role "Key Vault Secrets Officer" --scope "$(az keyvault show -n kv-portfolio-on-azure -g rg-portfolio-on-azure --query id -o tsv)"
+az role assignment create --assignee-object-id "$(az ad signed-in-user show --query id -o tsv)" --assignee-principal-type User --role "Key Vault Secrets Officer" --scope "$(az keyvault show -n kv-poa-webhook-guard -g rg-portfolio-on-azure --query id -o tsv)"
+```
+
+```bash
+az role assignment create --assignee-object-id "$(az ad signed-in-user show --query id -o tsv)" --assignee-principal-type User --role "Key Vault Secrets Officer" --scope "$(az keyvault show -n kv-poa-rag-receipts -g rg-portfolio-on-azure --query id -o tsv)"
 ```
 
 Role assignments take a minute or two to apply. A `Forbidden` from the next
-step right after this one means "wait", not "wrong".
+step right after these means "wait", not "wrong".
 
 ## 2. Set values without them reaching the screen, the history, or `ps`
 
@@ -58,39 +65,40 @@ Each command below keeps the value out of three places:
 
 These run in zsh or bash. Paste each block as a whole.
 
-**`webhook-secret`**: generated, never typed and never seen. Nothing in this
-project needs you to know it. A sender that signs webhooks would read it from
-the vault.
+**`webhook-secret`** in `kv-poa-webhook-guard`: generated, never typed and
+never seen. Nothing in this project needs you to know it. A sender that
+signs webhooks would read it from the vault.
 
 ```bash
 (
   umask 077; d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
   openssl rand -hex 32 | tr -d '\n' > "$d/v"
-  az keyvault secret set --vault-name kv-portfolio-on-azure --name webhook-secret \
+  az keyvault secret set --vault-name kv-poa-webhook-guard --name webhook-secret \
     --file "$d/v" --encoding utf-8 --query "{name:name, version:id, updated:attributes.updated}" -o table
 )
 ```
 
-**`voyage-api-key`**: pasted at a silent prompt.
+**`voyage-api-key`** in `kv-poa-rag-receipts`: pasted at a silent prompt.
 
 ```bash
 (
   umask 077; d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
   printf 'Voyage API key (input hidden): '; read -rs v; printf '\n'
   printf '%s' "$v" > "$d/v"; unset v
-  az keyvault secret set --vault-name kv-portfolio-on-azure --name voyage-api-key \
+  az keyvault secret set --vault-name kv-poa-rag-receipts --name voyage-api-key \
     --file "$d/v" --encoding utf-8 --query "{name:name, version:id, updated:attributes.updated}" -o table
 )
 ```
 
-**`anthropic-api-key`**: only when a full eval run has been approved.
+**`anthropic-api-key`** in `kv-poa-rag-receipts`: only when a full eval run
+has been approved.
 
 ```bash
 (
   umask 077; d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
   printf 'Anthropic API key (input hidden): '; read -rs v; printf '\n'
   printf '%s' "$v" > "$d/v"; unset v
-  az keyvault secret set --vault-name kv-portfolio-on-azure --name anthropic-api-key \
+  az keyvault secret set --vault-name kv-poa-rag-receipts --name anthropic-api-key \
     --file "$d/v" --encoding utf-8 --query "{name:name, version:id, updated:attributes.updated}" -o table
 )
 ```
@@ -103,16 +111,20 @@ runs each block in a subshell, so `v`, `d` and the trap disappear with it.
 ## 3. Check what is set, without reading values
 
 ```bash
-az keyvault secret list --vault-name kv-portfolio-on-azure \
-  --query "[].{name:name, enabled:attributes.enabled, updated:attributes.updated}" -o table
+for kv in kv-poa-webhook-guard kv-poa-rag-receipts; do
+  echo "== $kv"
+  az keyvault secret list --vault-name "$kv" \
+    --query "[].{name:name, enabled:attributes.enabled, updated:attributes.updated}" -o table
+done
 ```
 
 ## How the apps read them
 
 Each app's secret is a Key Vault *reference*: the Container App holds the
-secret's versionless URL (`https://kv-portfolio-on-azure.vault.azure.net/secrets/<name>`)
-and the resource ID of a user-assigned managed identity. The platform fetches
-the current value with that identity when a revision starts, and refreshes it
+secret's versionless URL (for example
+`https://kv-poa-webhook-guard.vault.azure.net/secrets/webhook-secret`) and the
+resource ID of its user-assigned managed identity. The platform fetches the
+current value with that identity when a revision starts, and refreshes it
 periodically. Every fetch is a Key Vault read, recorded as an `AuditEvent` in
 Log Analytics. Rotating a secret is `az keyvault secret set` again; no
 Terraform change, because the reference has no version in it.

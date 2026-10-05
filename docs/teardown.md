@@ -13,16 +13,18 @@ hours to appear.
 ```bash
 RG=rg-portfolio-on-azure
 SA=stportfolioazuretf
-KV=kv-portfolio-on-azure
+VAULTS=(kv-poa-webhook-guard kv-poa-rag-receipts)   # one Key Vault per workload (an array: works in zsh and bash)
 LOCATION=canadacentral
 ME=$(az ad signed-in-user show --query id -o tsv)
 ```
 
-## 1. Revoke your own Key Vault role, while the vault still exists
+## 1. Revoke your own Key Vault roles, while the vaults still exist
 
 ```bash
-az role assignment delete --assignee "$ME" --role "Key Vault Secrets Officer" \
-  --scope "$(az keyvault show -n "$KV" -g "$RG" --query id -o tsv)"
+for kv in "${VAULTS[@]}"; do
+  az role assignment delete --assignee "$ME" --role "Key Vault Secrets Officer" \
+    --scope "$(az keyvault show -n "$kv" -g "$RG" --query id -o tsv)"
+done
 ```
 
 ## 2. Destroy everything Terraform manages
@@ -44,8 +46,8 @@ rm -f destroy.tfplan
 cd ..
 ```
 
-This removes the Container App, the job, the Container Apps environment, the
-Key Vault (into soft delete), the Log Analytics workspace (permanently, see
+This removes the Container App, the job, the Container Apps environment, both
+Key Vaults (into soft delete), the Log Analytics workspace (permanently, see
 `delete_query_parameters` in the Terraform), the managed identities and their
 role assignments, the diagnostic settings and the budget. It does not touch
 the resource group or the state account: Terraform reads the first as a data
@@ -68,7 +70,6 @@ for app in github-portfolio-on-azure-plan github-portfolio-on-azure-apply; do
   # Deleted apps sit in the Entra recycle bin for 30 days; empty it.
   az rest --method DELETE --url "https://graph.microsoft.com/v1.0/directory/deletedItems/$obj_id"
 done
-
 ```
 
 ## 4. Lift the lock, then delete the resource group
@@ -93,8 +94,10 @@ az group delete --name "$RG"                        # prompts for confirmation
 ## 5. Purge what soft delete kept
 
 ```bash
-az keyvault list-deleted --query "[?name=='$KV']" -o table
-az keyvault purge --name "$KV" --location "$LOCATION"
+az keyvault list-deleted -o table      # both vaults should be listed
+for kv in "${VAULTS[@]}"; do
+  az keyvault purge --name "$kv" --location "$LOCATION"
+done
 ```
 
 Purge protection is off in this demo, which is why this works. The trade-off
