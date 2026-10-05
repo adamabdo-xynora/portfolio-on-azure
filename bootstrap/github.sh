@@ -13,6 +13,9 @@
 #      from main. The APPLY identity trusts only tokens issued to jobs in this
 #      environment, so the approval gate is enforced by Entra ID as well as
 #      by GitHub: a job outside the environment cannot get an APPLY token.
+#   3. A ruleset on main: changes arrive only by pull request with the
+#      `checks (no Azure)` and `plan (pull request)` checks green; no force
+#      push, no deletion, and no bypass, including for the admin.
 
 set -euo pipefail
 
@@ -27,6 +30,9 @@ readonly APPLY_APP_NAME="github-portfolio-on-azure-apply"
 
 ok() { printf '    ok: %s\n' "$*"; }
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+
+tmp_ruleset="$(mktemp)"
+trap 'rm -f "$tmp_ruleset"' EXIT
 
 app_id_for() {
   local name="$1" count
@@ -79,5 +85,79 @@ policies="$(gh api "repos/${REPO}/environments/${ENVIRONMENT}/deployment-branch-
   --jq '[.branch_policies[] | "\(.type):\(.name)"] | join(",")')"
 [[ "$policies" == "branch:main" ]] || die "unexpected deployment branch policies: $policies"
 ok "deployments only from main"
+
+printf '==> Ruleset on main\n'
+# Every change to main arrives through a pull request whose checks passed.
+# Without this, a direct push to main would skip the PR plan and comment,
+# and land straight in the plan-main/apply path (which is still gated by the
+# azure-demo approval, but would have had no reviewed PR behind it).
+#
+#   required_approving_review_count is 0 on purpose: this repository has one
+#   maintainer, and GitHub does not let an author approve their own pull
+#   request, so any higher number would block every merge. A team would set
+#   it to at least 1. The review that matters for infrastructure, approving
+#   the saved plan, is enforced separately by the azure-demo environment.
+#
+#   The required checks are pinned to the GitHub Actions app (integration
+#   15368), so a status reported by anything else cannot satisfy them.
+#   strict: the PR branch must be up to date with main, so the plan that was
+#   reviewed in the PR was made against the current main.
+#
+#   bypass_actors is empty: the rules apply to the repository admin too.
+#   Force pushes (non_fast_forward) and deleting main are blocked.
+readonly RULESET_NAME="main: pull request and green plan required"
+readonly ACTIONS_APP_ID=15368
+cat >"$tmp_ruleset" <<JSON
+{
+  "name": "${RULESET_NAME}",
+  "target": "branch",
+  "enforcement": "active",
+  "bypass_actors": [],
+  "conditions": { "ref_name": { "include": ["refs/heads/main"], "exclude": [] } },
+  "rules": [
+    { "type": "deletion" },
+    { "type": "non_fast_forward" },
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 0,
+        "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": false,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": false
+      }
+    },
+    {
+      "type": "required_status_checks",
+      "parameters": {
+        "strict_required_status_checks_policy": true,
+        "do_not_enforce_on_create": false,
+        "required_status_checks": [
+          { "context": "checks (no Azure)", "integration_id": ${ACTIONS_APP_ID} },
+          { "context": "plan (pull request)", "integration_id": ${ACTIONS_APP_ID} }
+        ]
+      }
+    }
+  ]
+}
+JSON
+ruleset_id="$(gh api "repos/${REPO}/rulesets" --jq "[.[] | select(.name == \"${RULESET_NAME}\") | .id] | first // empty")"
+if [[ -z "$ruleset_id" ]]; then
+  ruleset_id="$(gh api --method POST "repos/${REPO}/rulesets" --input "$tmp_ruleset" --jq .id)"
+else
+  gh api --method PUT "repos/${REPO}/rulesets/${ruleset_id}" --input "$tmp_ruleset" >/dev/null
+fi
+
+# Read it back and check what GitHub actually stored.
+summary="$(gh api "repos/${REPO}/rulesets/${ruleset_id}" --jq '[
+  .enforcement,
+  (.bypass_actors | length | tostring),
+  ([.rules[].type] | sort | join(",")),
+  (.rules[] | select(.type == "pull_request") | .parameters.required_approving_review_count | tostring),
+  ([.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | "\(.context)@\(.integration_id)"] | sort | join(";"))
+] | join("|")')"
+expected="active|0|deletion,non_fast_forward,pull_request,required_status_checks|0|checks (no Azure)@${ACTIONS_APP_ID};plan (pull request)@${ACTIONS_APP_ID}"
+[[ "$summary" == "$expected" ]] || die "ruleset as stored does not match: got '$summary', expected '$expected'"
+ok "ruleset ${ruleset_id}: PR required (0 approvals), checks required, no force push, no deletion, no bypass"
 
 printf '\nDone.\n'
