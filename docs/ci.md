@@ -83,3 +83,27 @@ material out of state in the first place:
 
 Artifacts are kept for one day, the shortest retention GitHub allows. The
 apply runs within minutes of the plan, so nothing needs them longer.
+
+## Changes to main: the ruleset
+
+`main` is protected by a repository ruleset, created and checked by
+`bootstrap/github.sh`, so it is reproducible rather than a one-off setting:
+
+| Rule | Setting |
+|---|---|
+| Pull request required | yes, with **0** required approvals (see below) |
+| Required status checks | `checks (no Azure)` and `plan (pull request)`, both pinned to the GitHub Actions app (integration 15368); the branch must be up to date with `main` |
+| Force pushes | blocked |
+| Deleting `main` | blocked |
+| Bypass actors | none: the rules apply to the repository admin too (GitHub reports `current_user_can_bypass: never`) |
+
+**Why 0 required approvals.** This repository has one maintainer, and GitHub
+does not let the author of a pull request approve it, so any higher number
+would block every merge. A team would set it to at least 1. The review that
+gates infrastructure, approving the saved plan before it is applied, is
+enforced separately by the `azure-demo` environment, which does have a
+required reviewer and no admin bypass.
+
+Verified on 2026-10-04 by pushing a commit directly to `main`. GitHub
+rejected it with `GH013: Repository rule violations`: *"Changes must be made
+through a pull request"* and *"2 of 2 required status checks are expected."*
