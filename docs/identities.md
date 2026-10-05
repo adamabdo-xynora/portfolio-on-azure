@@ -321,6 +321,12 @@ impossible.
 
 ### Trade-offs
 
+- **webhook-guard keeps its archive and dedup store on the replica's own
+  disk,** with at most one replica. Scaling to zero discards them, and a
+  second replica would dedup independently. That is acceptable for a demo
+  receiver. Production would mount persistent storage (for example an
+  Azure Files volume) and use a shared, atomic dedup store, the seam
+  `DedupStore` exists for.
 - **Key Vault purge protection is off** on both vaults, with 7-day
   soft-delete retention, so teardown can purge them the same day. A production deployment
   would turn purge protection on: then no one, including an attacker with

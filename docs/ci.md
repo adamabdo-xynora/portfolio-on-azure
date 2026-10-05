@@ -4,7 +4,7 @@ One workflow, [`.github/workflows/terraform.yml`](../.github/workflows/terraform
 
 | Job | Runs on | Azure identity | `GITHUB_TOKEN` permissions | Does |
 |---|---|---|---|---|
-| `checks` | every PR and push to main | none | `contents: read` | shellcheck the bootstrap scripts, test the plan-secrets guard, `terraform fmt -check`, `terraform validate` |
+| `checks` | every PR, push to main and manual run | none | `contents: read`, `attestations: read` | shellcheck the scripts, verify the provenance of every pinned image (`scripts/verify_images.sh`), test the plan-secrets guard, `terraform fmt -check`, `terraform validate` |
 | `plan-pr` | pull requests | PLAN | `contents: read`, `id-token: write` | `terraform plan`, plan-secrets guard, hands the plan text to `comment` |
 | `comment` | pull requests | none | `pull-requests: write` | posts or updates one plan comment on the PR |
 | `plan-main` | push to main, or a manual run (`workflow_dispatch`) | PLAN | `contents: read`, `id-token: write` | `terraform plan -out`, plan-secrets guard, SHA-256 of the plan file, uploads it |
@@ -54,6 +54,20 @@ no environment secrets, and no Dependabot secrets.
 
 Pull requests from forks get no OIDC token, so their plan job fails at login
 by design. Only branches in this repository can run a plan against Azure.
+
+## Image provenance, before any plan or apply
+
+`images.json` pins each container image by the digest of its multi-arch
+index, never by tag. A tag can be moved to different bytes; a digest
+cannot. `scripts/verify_images.sh` runs in `checks`, which every plan and
+apply depends on. For each image it requires a SLSA provenance attestation
+whose signing certificate names exactly the source repository's
+`publish.yml` workflow at the release tag (`--cert-identity`), with that tag
+as the source ref, built on a GitHub-hosted runner. It then verifies the
+same image against a wrong signer identity and fails unless that is
+rejected, so a verifier that accepts anything cannot pass silently. Before
+first use it was also run against an unattested digest (the webhook-guard
+amd64 child manifest), which it rejected.
 
 ## Public artifacts and logs
 

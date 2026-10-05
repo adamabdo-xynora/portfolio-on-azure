@@ -1,0 +1,18 @@
+{
+  "webhook-guard": {
+    "image": "ghcr.io/adamabdo-xynora/webhook-guard",
+    "tag": "0.1.1",
+    "digest": "sha256:0f5dcdcc8a47349d3741441c6f18fa87342edc9608c1e536520e660d5f39ff5c",
+    "source_repo": "adamabdo-xynora/webhook-guard",
+    "source_ref": "refs/tags/v0.1.1",
+    "signer_workflow": "adamabdo-xynora/webhook-guard/.github/workflows/publish.yml"
+  },
+  "rag-receipts": {
+    "image": "ghcr.io/adamabdo-xynora/rag-receipts",
+    "tag": "0.1.1",
+    "digest": "sha256:4ac42a67897e2562d5174fa9b7391186fe4499e63a194701f9b31073664be1dd",
+    "source_repo": "adamabdo-xynora/rag-receipts",
+    "source_ref": "refs/tags/v0.1.1",
+    "signer_workflow": "adamabdo-xynora/rag-receipts/.github/workflows/publish.yml"
+  }
+}

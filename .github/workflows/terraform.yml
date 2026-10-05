@@ -71,6 +71,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      # Read-only: lets gh fetch the images' build-provenance attestations.
+      attestations: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -81,8 +83,17 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
 
-      - name: shellcheck bootstrap scripts
-        run: shellcheck --shell=bash bootstrap/*.sh
+      - name: shellcheck bootstrap and CI scripts
+        run: shellcheck --shell=bash bootstrap/*.sh scripts/*.sh
+
+      # Every image in images.json must carry SLSA provenance signed by its
+      # own repository's publish workflow at the release tag, built on a
+      # GitHub-hosted runner. The script also checks that a wrong signer is
+      # rejected. This job gates plan-pr and plan-main, and so every apply.
+      - name: verify image provenance (pinned digests)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/verify_images.sh images.json
 
       - name: plan-secrets guard tests (unit and end-to-end with real Terraform)
         run: python3 -m unittest discover -s scripts -v
