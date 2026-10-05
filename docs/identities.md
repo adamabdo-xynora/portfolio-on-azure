@@ -216,3 +216,15 @@ the resource is managed with azapi. Because azapi resources can show a
 perpetual diff when the body read back differs from the body sent, each
 first apply is followed by a fresh plan that must show zero changes
 (`docs/verification.md`).
+
+### Trade-offs
+
+- **The state account allows public network access.** GitHub-hosted
+  runners reach it over the internet. Access is Entra ID only, with shared
+  keys off. A production deployment would use a private endpoint with
+  self-hosted runners instead.
+- **The `azure-demo` environment does not prevent self-review.** This is a
+  one-person project, and the person who merges is the only possible
+  reviewer. A team would turn `prevent_self_review` on. Admin bypass *is*
+  off (`can_admins_bypass: false`), so even the repository admin cannot
+  deploy without approving.

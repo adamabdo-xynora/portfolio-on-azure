@@ -53,15 +53,21 @@ REVIEWER_ID="$(gh api "users/${REVIEWER_LOGIN}" --jq .id)"
 # prevent_self_review stays false: this is a one-person project, and the
 # person who merges is the only possible reviewer. Recorded as a trade-off in
 # the README; a team would turn it on.
+# can_admins_bypass is false: GitHub's default lets a repository admin deploy
+# past the required reviewer, which on a one-person repository would make the
+# approval a convention rather than a control.
 gh api --method PUT "repos/${REPO}/environments/${ENVIRONMENT}" --input - >/dev/null <<JSON
 {
   "wait_timer": 0,
   "prevent_self_review": false,
+  "can_admins_bypass": false,
   "reviewers": [{ "type": "User", "id": ${REVIEWER_ID} }],
   "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true }
 }
 JSON
-ok "required reviewer ${REVIEWER_LOGIN} (${REVIEWER_ID})"
+bypass="$(gh api "repos/${REPO}/environments/${ENVIRONMENT}" --jq .can_admins_bypass)"
+[[ "$bypass" == "false" ]] || die "can_admins_bypass is '$bypass', expected false"
+ok "required reviewer ${REVIEWER_LOGIN} (${REVIEWER_ID}); admins cannot bypass"
 
 policies="$(gh api "repos/${REPO}/environments/${ENVIRONMENT}/deployment-branch-policies" \
   --jq '[.branch_policies[] | "\(.type):\(.name)"] | join(",")')"
