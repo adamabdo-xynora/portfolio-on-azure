@@ -158,7 +158,18 @@ both enforce: it runs only a saved plan that a reviewer approved, from
 
 ## The managed identities
 
-Added with the shared resources (PR 3) and documented here when they exist.
+User-assigned, one per workload, created by Terraform (`terraform/identities.tf`).
+
+| Identity | Used by | Role | Scope | Why |
+|---|---|---|---|---|
+| `id-webhook-guard` | the webhook-guard Container App | Key Vault Secrets User | the vault `kv-portfolio-on-azure` | to read `webhook-secret` through a Key Vault reference |
+| `id-rag-receipts` | the rag-receipts Container Apps Job | Key Vault Secrets User | the vault `kv-portfolio-on-azure` | to read `voyage-api-key` (and `anthropic-api-key`, only if a full eval is approved) |
+
+Key Vault Secrets User can read secret values and nothing else: it cannot
+list keys, write secrets, or change the vault. These two assignments are the
+only ones the APPLY identity is allowed to make (see the RBAC Administrator
+condition above). Each is created with `principal_type = "ServicePrincipal"`,
+which that condition requires.
 
 ## Decisions and corrections
 
@@ -219,6 +230,26 @@ first apply is followed by a fresh plan that must show zero changes
 
 ### Trade-offs
 
+- **Each managed identity can read every secret in the vault.** The role is
+  assigned at vault scope, so the webhook-guard identity could read the
+  Voyage key, and the rag-receipts identity the webhook secret. A production
+  deployment would scope each identity to its own secrets: one vault per
+  workload, or assignments on individual secrets. Per-secret assignments
+  are possible once the secrets exist, but this project creates the vault
+  and its permissions before any secret is set, so the assignments are at
+  vault scope.
+- **Key Vault purge protection is off,** with 7-day soft-delete retention,
+  so teardown can purge the vault the same day. A production deployment
+  would turn purge protection on: then no one, including an attacker with
+  full rights, can permanently delete a deleted vault before its retention
+  ends, so it always stays recoverable.
+- **The Container Apps environment is the Consumption-only type,** which
+  Microsoft labels legacy, because Microsoft states it has no environment
+  cost. A production deployment would use a workload-profiles environment.
+- **The Log Analytics workspace has a 0.1 GB/day cap,** to stay inside the
+  5 GB/month free grant even if the cap is hit every day. Once the cap is
+  reached, audit events stop until the daily reset. A production audit
+  workspace would not be capped this way.
 - **The state account allows public network access.** GitHub-hosted
   runners reach it over the internet. Access is Entra ID only, with shared
   keys off. A production deployment would use a private endpoint with
